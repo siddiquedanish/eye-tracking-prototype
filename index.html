@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Eye Tracking Prototype</title>
+<style>
+body{margin:0;font-family:system-ui;background:#0b1020;color:white}
+main{max-width:850px;margin:auto;padding:20px}
+.card{background:#151c33;padding:18px;border-radius:18px;margin-bottom:16px}
+button{padding:14px 18px;border:0;border-radius:12px;font-size:16px;font-weight:700;background:#79a7ff;cursor:pointer}
+#stage{position:relative;height:60vh;min-height:430px;background:#0f1630;border-radius:18px;overflow:hidden}
+video{position:absolute;right:10px;bottom:10px;width:110px;border-radius:10px;opacity:.3;transform:scaleX(-1)}
+.dot{position:absolute;transform:translate(-50%,-50%);border-radius:50%}
+#target{width:48px;height:48px;background:#ffdc5e;box-shadow:0 0 25px #ffdc5e}
+#gaze{width:20px;height:20px;border:3px solid #63d297}
+#cal{width:34px;height:34px;background:#79a7ff}
+.hidden{display:none}
+#hud{position:absolute;left:12px;top:12px;background:#080c1bbb;padding:10px;border-radius:10px;z-index:5}
+.metric{display:flex;justify-content:space-between;padding:9px 0;border-bottom:1px solid #ffffff18}
+.muted{color:#aeb8d4}
+</style>
+</head>
+<body><main>
+<div class="card">
+<h1>Eye Tracking Prototype</h1>
+<p class="muted">Proof of concept only. Scores represent performance in this game and are not medical or diagnostic measurements.</p>
+<button id="cameraBtn">Enable Camera</button>
+<button id="calBtn" disabled>Calibrate</button>
+<button id="testBtn" disabled>Start 30-sec Test</button>
+<p id="status">Camera not started.</p>
+</div>
+<div id="stage">
+<div id="hud">Position your face comfortably in front of the device.</div>
+<video id="video" autoplay playsinline muted></video>
+<div id="target" class="dot hidden"></div>
+<div id="gaze" class="dot hidden"></div>
+<div id="cal" class="dot hidden"></div>
+</div>
+<div id="results" class="card hidden">
+<h2>Results</h2>
+<div class="metric"><span>Tracking accuracy</span><strong id="accuracy">—</strong></div>
+<div class="metric"><span>Longest streak</span><strong id="streak">—</strong></div>
+<div class="metric"><span>Gaze breaks</span><strong id="breaks">—</strong></div>
+<div class="metric"><span>Tracking availability</span><strong id="availability">—</strong></div>
+</div>
+</main>
+<script type="module">
+import {FaceLandmarker,FilesetResolver} from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22-rc.20250304";
+const $=id=>document.getElementById(id), video=$("video"), stage=$("stage");
+let lm=null,lastFeature=null,lastSeen=0,coefX=null,coefY=null,calibrated=false,game=null;
+const pts=[[.5,.5],[.15,.5],[.85,.5],[.5,.18],[.5,.82]];
+function place(el,p){el.style.left=p[0]*100+"%";el.style.top=p[1]*100+"%"}
+async function model(){
+ const v=await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22-rc.20250304/wasm");
+ lm=await FaceLandmarker.createFromOptions(v,{baseOptions:{modelAssetPath:"https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",delegate:"GPU"},runningMode:"VIDEO",numFaces:1});
+}
+$("cameraBtn").onclick=async()=>{
+ try{
+  $("status").textContent="Loading camera and eye model...";
+  if(!lm) await model();
+  video.srcObject=await navigator.mediaDevices.getUserMedia({video:{facingMode:"user"},audio:false});
+  await video.play(); $("calBtn").disabled=false;$("status").textContent="Camera ready. Keep your whole face visible."; loop();
+ }catch(e){$("status").textContent="Camera could not start. Check camera permission and reload.";console.error(e)}
+};
+function feature(L){
+ const av=ids=>[ids.reduce((s,i)=>s+L[i].x,0)/ids.length,ids.reduce((s,i)=>s+L[i].y,0)/ids.length];
+ const a=av([468,469,470,471,472]),b=av([473,474,475,476,477]);
+ const w1=Math.max(.0001,Math.abs(L[133].x-L[33].x)),w2=Math.max(.0001,Math.abs(L[263].x-L[362].x));
+ return [((a[0]-Math.min(L[33].x,L[133].x))/w1+(b[0]-Math.min(L[362].x,L[263].x))/w2)/2,(a[1]+b[1])/2-L[168].y];
+}
+function solve(A,b){let M=A.map((r,i)=>[...r,b[i]]);for(let i=0;i<3;i++){let p=i;for(let r=i+1;r<3;r++)if(Math.abs(M[r][i])>Math.abs(M[p][i]))p=r;[M[i],M[p]]=[M[p],M[i]];let d=M[i][i];if(Math.abs(d)<1e-9)return null;for(let c=i;c<4;c++)M[i][c]/=d;for(let r=0;r<3;r++)if(r!=i){let f=M[r][i];for(let c=i;c<4;c++)M[r][c]-=f*M[i][c]}}return M.map(r=>r[3])}
+function fit(F,Y){let A=[[0,0,0],[0,0,0],[0,0,0]],b=[0,0,0];F.forEach((f,i)=>{let x=[f[0],f[1],1];for(let r=0;r<3;r++){b[r]+=x[r]*Y[i];for(let c=0;c<3;c++)A[r][c]+=x[r]*x[c]}});return solve(A,b)}
+let gazeP=null;
+function loop(){
+ if(video.readyState>=2){
+  try{let r=lm.detectForVideo(video,performance.now());if(r.faceLandmarks?.length){lastFeature=feature(r.faceLandmarks[0]);lastSeen=performance.now();if(calibrated){let f=lastFeature;gazeP=[coefX[0]*f[0]+coefX[1]*f[1]+coefX[2],coefY[0]*f[0]+coefY[1]*f[1]+coefY[2]].map(v=>Math.max(0,Math.min(1,v)));place($("gaze"),gazeP);$("gaze").classList.remove("hidden")}}}catch(e){}
+ }
+ requestAnimationFrame(loop)
+}
+$("calBtn").onclick=async()=>{
+ $("testBtn").disabled=true;$("cal").classList.remove("hidden");$("hud").textContent="Look at each blue dot without moving your head.";
+ let samples=[];
+ for(let i=0;i<pts.length;i++){place($("cal"),pts[i]);await new Promise(r=>setTimeout(r,450));let a=[];let end=performance.now()+1000;while(performance.now()<end){if(lastFeature)a.push([...lastFeature]);await new Promise(r=>setTimeout(r,50))}if(!a.length){$("status").textContent="Calibration failed. Keep your face visible and retry.";return}samples.push(a[0].map((_,j)=>a.reduce((s,x)=>s+x[j],0)/a.length))}
+ coefX=fit(samples,pts.map(p=>p[0]));coefY=fit(samples,pts.map(p=>p[1]));calibrated=!!coefX&&!!coefY;$("cal").classList.add("hidden");$("testBtn").disabled=!calibrated;$("status").textContent=calibrated?"Calibration complete. Look around and see whether the green marker follows your gaze.":"Calibration failed.";
+};
+$("testBtn").onclick=()=>{
+ $("results").classList.add("hidden");$("target").classList.remove("hidden");let now=performance.now();game={start:now,end:now+30000,from:[.5,.5],to:[.2,.3],seg:now,n:0,on:0,avail:0,breaks:0,was:false,streak:0,best:0,last:now};requestAnimationFrame(play)
+};
+function rnd(){return [.12+Math.random()*.76,.18+Math.random()*.65]}
+function play(t){
+ let g=game;if(!g)return;if(t>=g.end){finish();return}if(t-g.seg>1200){g.from=g.to;g.to=rnd();g.seg=t}let q=Math.min(1,(t-g.seg)/1200),s=q*q*(3-2*q),p=[g.from[0]+(g.to[0]-g.from[0])*s,g.from[1]+(g.to[1]-g.from[1])*s];place($("target"),p);let dt=t-g.last;g.last=t;g.n++;if(gazeP&&performance.now()-lastSeen<350){g.avail++;let on=Math.hypot(gazeP[0]-p[0],gazeP[1]-p[1])<.12;if(on){g.on++;g.streak+=dt;g.best=Math.max(g.best,g.streak)}else{if(g.was)g.breaks++;g.streak=0}g.was=on}else{if(g.was)g.breaks++;g.was=false;g.streak=0}$("hud").textContent="Follow the yellow ball • "+Math.ceil((g.end-t)/1000)+"s";requestAnimationFrame(play)
+}
+function finish(){let g=game;game=null;$("target").classList.add("hidden");let a=g.avail?Math.round(g.on/g.avail*100):0,v=g.n?Math.round(g.avail/g.n*100):0;$("accuracy").textContent=a+"%";$("streak").textContent=(g.best/1000).toFixed(1)+" sec";$("breaks").textContent=g.breaks;$("availability").textContent=v+"%";$("results").classList.remove("hidden");$("hud").textContent="Test complete."}
+</script>
+</body></html>
